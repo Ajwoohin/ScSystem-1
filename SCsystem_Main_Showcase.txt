@@ -1,0 +1,524 @@
+SCsystem - Core Application Showcase
+
+This document contains the main.dart file showcasing the primary UI routing, state management, image handling, and authentication flow for the SCsystem application.
+
+Note: Database endpoints and API credentials have been redacted with placeholders to ensure backend security.
+
+[Source converted from the uploaded PDF. The code content follows.]
+
+import 'package:flutter/material.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'theme_selection_screen.dart';
+import 'welcome_screen.dart';
+import 'package:qr_flutter/qr_flutter.dart';
+import 'quests_screen.dart';
+import 'points_history_screen.dart';
+import 'admin_home_screen.dart';
+import 'camera_action_button.dart';
+import 'waiting_approval_screen.dart';
+import 'teacher_home_screen.dart';
+import 'announcements_screen.dart';
+import 'bus_screen.dart';
+import 'package:image_picker/image_picker.dart';
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Supabase.initialize(
+    url: 'YOUR_SUPABASE_URL_HERE',
+    publishableKey: 'YOUR_SUPABASE_ANON_KEY_HERE',
+  );
+  runApp(const MyApp());
+}
+
+final supabase = Supabase.instance.client;
+
+class MyApp extends StatefulWidget {
+  const MyApp({super.key});
+  @override
+  State<MyApp> createState() => _MyAppState();
+}
+
+class _MyAppState extends State<MyApp> {
+  ThemeMode? _themeMode;
+  bool _themeChosenBefore = false;
+  bool _isAdmin = false;
+  String? _staffStatus;
+  bool _isCheckingStaff = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadSavedTheme();
+    _loadAdminStatus();
+    _checkStaffStatus();
+  }
+
+  Future<void> _checkStaffStatus() async {
+    final session = supabase.auth.currentSession;
+    if (session == null) {
+      setState(() {
+        _staffStatus = null;
+        _isCheckingStaff = false;
+      });
+      return;
+    }
+    try {
+      final data = await supabase
+          .from('staff')
+          .select('status')
+          .eq('id', session.user.id)
+          .maybeSingle();
+      setState(() {
+        _staffStatus = data?['status'];
+        _isCheckingStaff = false;
+      });
+    } catch (e) {
+      setState(() {
+        _staffStatus = null;
+        _isCheckingStaff = false;
+      });
+    }
+  }
+
+  Future<void> _loadSavedTheme() async {
+    final prefs = await SharedPreferences.getInstance();
+    final saved = prefs.getString('theme_mode');
+    setState(() {
+      if (saved == 'dark') {
+        _themeMode = ThemeMode.dark;
+        _themeChosenBefore = true;
+      } else if (saved == 'light') {
+        _themeMode = ThemeMode.light;
+        _themeChosenBefore = true;
+      } else {
+        _themeMode = ThemeMode.light;
+        _themeChosenBefore = false;
+      }
+    });
+  }
+
+  Future<void> _loadAdminStatus() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _isAdmin = prefs.getBool('is_admin') ?? false;
+    });
+  }
+
+  void _onThemeSelected(ThemeMode mode) {
+    setState(() {
+      _themeMode = mode;
+      _themeChosenBefore = true;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_themeMode == null) {
+      return const MaterialApp(
+        home: Scaffold(body: Center(child: CircularProgressIndicator())),
+      );
+    }
+
+    return MaterialApp(
+      title: 'SCsystem',
+      themeMode: _themeMode,
+      theme: ThemeData(brightness: Brightness.light, primarySwatch: Colors.indigo),
+      darkTheme: ThemeData(brightness: Brightness.dark, primarySwatch: Colors.indigo),
+      home: !_themeChosenBefore
+          ? ThemeSelectionScreen(onThemeSelected: _onThemeSelected)
+          : (_isCheckingStaff
+              ? const Scaffold(body: Center(child: CircularProgressIndicator()))
+              : (_isAdmin
+                  ? const AdminHomeScreen()
+                  : (_staffStatus == 'approved'
+                      ? const TeacherHomeScreen()
+                      : (_staffStatus == 'pending'
+                          ? const WaitingApprovalScreen()
+                          : (supabase.auth.currentSession != null
+                              ? const HomePage()
+                              : const WelcomeScreen()))))),
+    );
+  }
+}
+
+class HomePage extends StatefulWidget {
+  const HomePage({super.key});
+  @override
+  State<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends State<HomePage> {
+  Map<String, dynamic>? _studentData;
+  bool _isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadStudentData();
+  }
+
+  Future<void> _changeProfilePhoto() async {
+    final source = await showModalBottomSheet<ImageSource>(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Wrap(
+          children: [
+            ListTile(
+              leading: const Icon(Icons.photo_library),
+              title: const Text('Choose from Gallery'),
+              onTap: () => Navigator.pop(context, ImageSource.gallery),
+            ),
+            ListTile(
+              leading: const Icon(Icons.camera_alt),
+              title: const Text('Take a Photo'),
+              onTap: () => Navigator.pop(context, ImageSource.camera),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (source == null) return;
+    final picker = ImagePicker();
+    final picked = await picker.pickImage(source: source, imageQuality: 70);
+    if (picked == null) return;
+
+    try {
+      final bytes = await picked.readAsBytes();
+      final userId = supabase.auth.currentUser!.id;
+      final fileName =
+          'profile_${userId}_${DateTime.now().millisecondsSinceEpoch}.jpg';
+      await supabase.storage.from('profile-photos').uploadBinary(fileName, bytes);
+      final url =
+          supabase.storage.from('profile-photos').getPublicUrl(fileName);
+      await supabase
+          .from('students')
+          .update({'profile_photo_url': url})
+          .eq('id', userId);
+
+      if (!mounted) return;
+      setState(() => _studentData!['profile_photo_url'] = url);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Error: $e')));
+    }
+  }
+
+  Future<void> _editBio() async {
+    final controller =
+        TextEditingController(text: _studentData!['bio'] ?? '');
+    final result = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Edit Bio'),
+        content: TextField(
+          controller: controller,
+          maxLines: 5,
+          maxLength: 1000,
+          decoration: const InputDecoration(
+            hintText: 'Tell others a bit about yourself...',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: () =>
+                Navigator.pop(dialogContext, controller.text.trim()),
+            child: const Text('Save'),
+          ),
+        ],
+      ),
+    );
+
+    if (result == null) return;
+    try {
+      final userId = supabase.auth.currentUser!.id;
+      await supabase.from('students').update({'bio': result}).eq('id', userId);
+      setState(() => _studentData!['bio'] = result);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('Error: $e')));
+    }
+  }
+
+  Future<void> _loadStudentData() async {
+    try {
+      final userId = supabase.auth.currentUser!.id;
+      final data = await supabase
+          .from('students')
+          .select()
+          .eq('id', userId)
+          .single();
+
+      await supabase
+          .from('students')
+          .update({'last_active_at': DateTime.now().toIso8601String()})
+          .eq('id', userId);
+
+      setState(() {
+        _studentData = data;
+        _isLoading = false;
+      });
+    } catch (e) {
+      setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _logOut(BuildContext context) async {
+    await supabase.auth.signOut();
+    if (context.mounted) {
+      Navigator.pushAndRemoveUntil(
+        context,
+        MaterialPageRoute(builder: (context) => const WelcomeScreen()),
+        (route) => false,
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('SCsystem')),
+      drawer: Drawer(
+        width: MediaQuery.of(context).size.width * 0.65,
+        child: ListView(
+          padding: EdgeInsets.zero,
+          children: [
+            DrawerHeader(
+              decoration:
+                  BoxDecoration(color: Theme.of(context).primaryColor),
+              child: const Text(
+                'Menu',
+                style: TextStyle(color: Colors.white, fontSize: 24),
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.home),
+              title: const Text('Home'),
+              onTap: () => Navigator.pop(context),
+            ),
+            ListTile(
+              leading: const Icon(Icons.campaign),
+              title: const Text('Announcements'),
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => AnnouncementsScreen(
+                      canPost: false,
+                      postedByName: _studentData?['full_name'] ?? '',
+                    ),
+                  ),
+                );
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.list_alt),
+              title: const Text('Quests'),
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) =>
+                        const QuestsScreen(postedByName: 'Administration'),
+                  ),
+                );
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.directions_bus),
+              title: const Text('Bus'),
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => const BusScreen()),
+                );
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.history),
+              title: const Text('Points History'),
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => const PointsHistoryScreen(),
+                  ),
+                );
+              },
+            ),
+            const Divider(),
+            ListTile(
+              leading: const Icon(Icons.logout),
+              title: const Text('Log Out'),
+              onTap: () => _logOut(context),
+            ),
+          ],
+        ),
+      ),
+      floatingActionButton: const CameraActionButton(role: 'student'),
+      floatingActionButtonLocation: FloatingActionButtonLocation.centerFloat,
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : _studentData == null
+              ? const Center(child: Text('Could not load profile.'))
+              : RefreshIndicator(
+                  onRefresh: _loadStudentData,
+                  child: SingleChildScrollView(
+                    physics: const AlwaysScrollableScrollPhysics(),
+                    padding: const EdgeInsets.all(24.0),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.center,
+                          children: [
+                            GestureDetector(
+                              onTap: _changeProfilePhoto,
+                              child: Stack(
+                                children: [
+                                  CircleAvatar(
+                                    radius: 45,
+                                    backgroundImage:
+                                        _studentData!['profile_photo_url'] != null
+                                            ? NetworkImage(_studentData![
+                                                'profile_photo_url'])
+                                            : null,
+                                    child: _studentData!['profile_photo_url'] ==
+                                            null
+                                        ? const Icon(Icons.person, size: 45)
+                                        : null,
+                                  ),
+                                  Positioned(
+                                    bottom: 0,
+                                    right: 0,
+                                    child: Container(
+                                      padding: const EdgeInsets.all(4),
+                                      decoration: BoxDecoration(
+                                        color:
+                                            Theme.of(context).primaryColor,
+                                        shape: BoxShape.circle,
+                                        border: Border.all(
+                                          color: Theme.of(context)
+                                              .scaffoldBackgroundColor,
+                                          width: 2,
+                                        ),
+                                      ),
+                                      child: const Icon(
+                                        Icons.camera_alt,
+                                        size: 14,
+                                        color: Colors.white,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(width: 16),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    _studentData!['full_name'] ?? '',
+                                    style: const TextStyle(
+                                      fontSize: 20,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    'EDP: ${_studentData!['edp_number'] ?? ''}',
+                                    style: const TextStyle(fontSize: 15),
+                                  ),
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    'SCpoints: ${_studentData!['sc_points'] ?? 0}',
+                                    style: const TextStyle(
+                                      fontSize: 15,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 20),
+                        Stack(
+                          children: [
+                            Container(
+                              width: double.infinity,
+                              padding: const EdgeInsets.all(14),
+                              decoration: BoxDecoration(
+                                border: Border.all(color: Colors.grey),
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Padding(
+                                padding: const EdgeInsets.only(right: 28),
+                                child: Text(
+                                  (_studentData!['bio'] as String?)?.isNotEmpty ==
+                                          true
+                                      ? _studentData!['bio']
+                                      : 'No description yet.',
+                                  textAlign: TextAlign.center,
+                                ),
+                              ),
+                            ),
+                            Positioned(
+                              top: 4,
+                              right: 4,
+                              child: IconButton(
+                                icon: const Icon(Icons.edit, size: 18),
+                                onPressed: _editBio,
+                                tooltip: 'Edit bio',
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 28),
+                        Center(
+                          child: Container(
+                            padding: const EdgeInsets.all(20),
+                            decoration: BoxDecoration(
+                              color: Colors.white,
+                              borderRadius: BorderRadius.circular(16),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: Colors.black.withValues(alpha: 0.15),
+                                  blurRadius: 10,
+                                ),
+                              ],
+                            ),
+                            child: QrImageView(
+                              data: _studentData!['qr_code_id'] ?? '',
+                              version: QrVersions.auto,
+                              size: 220,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        const Center(
+                          child: Text(
+                            'Show this code for scanning',
+                            style: TextStyle(color: Colors.grey),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+    );
+  }
+}
